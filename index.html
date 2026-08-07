@@ -215,7 +215,7 @@
       <div class="month-toggle" id="month-toggle-global"></div>
       <div style="display:flex;gap:8px;">
         <button class="btn ghost small" onclick="window.print()">⬇ Download Current Tab</button>
-        <button class="btn small" onclick="downloadAllSectionsPDF()">⬇ Download Full Report (PDF)</button>
+        <button class="btn small" onclick="downloadAllSectionsPDF()">🗎 Consolidated Report — All Tabs</button>
       </div>
     </div>
     <div class="ticker" id="ticker"></div>
@@ -581,7 +581,12 @@ const properties = {
   }
 };
 
+function currentMonthKey(){ const d = new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }
+function pickDefaultMonth(p){
+  return currentMonthKey(); /* always open on the current month */
+}
 let state = { property:"C", month:"2026-07" };
+state.month = pickDefaultMonth(properties[state.property]);
 let charts = {};
 
 /* ================= UTILS ================= */
@@ -641,8 +646,7 @@ function setPage(p){
 }
 function setProperty(key){
   state.property = key;
-  const months = monthsFor(properties[key]);
-  if(!months.includes(state.month)) state.month = months[0];
+  if(!windowMonths().includes(state.month)) state.month = pickDefaultMonth(properties[key]);
   renderAll();
 }
 function setMonth(m){ state.month = m; renderAll(); }
@@ -657,11 +661,21 @@ function buildPropSwitch(){
     Object.values(properties).map(p=>p.name.toUpperCase()).join("<br>") +
     "<br><br>GENERATED " + new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}).toUpperCase().replace(/ /g,"-");
 }
+function windowMonths(){
+  /* rolling window: current month + next two — previous months are not offered */
+  const d = new Date();
+  return [0,1,2].map(off=>{
+    const dd = new Date(d.getFullYear(), d.getMonth()+off, 1);
+    return dd.getFullYear()+"-"+String(dd.getMonth()+1).padStart(2,"0");
+  });
+}
 function buildMonthToggle(){
-  const months = monthsFor(properties[state.property]);
+  const months = windowMonths();
   if(!months.includes(state.month)) state.month = months[0];
+  const p = properties[state.property];
+  const has = m => monthsFor(p).includes(m);
   document.getElementById("month-toggle-global").innerHTML = months.map(m=>
-    `<button class="${m===state.month?'active':''}" onclick="setMonth('${m}')">${monthLabel(m)}</button>`).join("");
+    `<button class="${m===state.month?'active':''}" onclick="setMonth('${m}')" title="${has(m)?'':'No data uploaded yet for this month'}">${monthLabel(m)}${has(m)?'':' \u00b7'}</button>`).join("");
 }
 
 /* ================= TICKER ================= */
@@ -817,7 +831,7 @@ function renderRevenue(){
         { type:"bar", label:"Revenue", data:years.map(y=>rc[y].rev), backgroundColor:"#177E71", borderRadius:5, yAxisID:"y", barPercentage:0.55 },
         { type:"line", label:"Occupancy %", data:years.map(y=>rc[y].occ), borderColor:"#A87A2F", backgroundColor:"#A87A2F", yAxisID:"y1", tension:0.35, pointRadius:4 }
       ]},
-    options:{ plugins:{legend:{labels:{color:"#5B6B85"}}},
+    options:{ layout:{padding:{top:14}}, plugins:{legend:{labels:{color:"#5B6B85"}}, barValues:{enabled:true}},
       scales:{ x:{ticks:{color:"#5B6B85"},grid:{display:false}},
         y:{position:"left",ticks:{color:"#5B6B85",callback:v=>"AED "+(v/1000)+"k"},grid:{color:"rgba(18,26,46,0.06)"}},
         y1:{position:"right",min:0,max:100,ticks:{color:"#5B6B85",callback:v=>v+"%"},grid:{display:false}} } }
@@ -874,7 +888,7 @@ function renderForecast(){
 
   destroy("fc-main-chart");
   const mainBody = document.getElementById("fc-main-body");
-  const segMonths = monthsFor(p).filter(m=>p.segment[m]);
+  const segMonths = monthsFor(p).filter(m=>p.segment[m] && m >= currentMonthKey());
   if(segMonths.length){
     mainBody.innerHTML = `<div class="chart-wrap tall"><canvas id="fc-main-chart"></canvas></div>`;
     charts["fc-main-chart"] = new Chart(document.getElementById("fc-main-chart"), {
@@ -1505,19 +1519,75 @@ function wireDragEvents(){
 function downloadAllSectionsPDF(){
   const p = properties[state.property];
   document.getElementById("print-cover-title").textContent = p.name;
-  document.getElementById("print-cover-sub").textContent = "Full Revenue Deep Dive — " + monthLabel(state.month) + " · Generated " + new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});
+  document.getElementById("print-cover-sub").textContent = "Full Revenue Deep Dive \u2014 " + monthLabel(state.month) + " \u00b7 Generated " + new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});
+  const activePage = document.querySelector(".page.active");
+  const restoreId = activePage ? activePage.id : null;
   document.body.classList.add("print-all");
-  const cleanup = ()=>{ document.body.classList.remove("print-all"); window.removeEventListener("afterprint", cleanup); };
+  /* make every tab visible on screen so each canvas gets real dimensions, then redraw everything */
+  document.querySelectorAll(".page").forEach(el=>el.classList.add("active"));
+  const prevAnim = Chart.defaults.animation;
+  Chart.defaults.animation = false;
+  renderAll();
+  Chart.defaults.animation = prevAnim;
+  let done = false;
+  const cleanup = ()=>{
+    if(done) return; done = true;
+    document.body.classList.remove("print-all");
+    document.querySelectorAll(".page").forEach(el=>el.classList.remove("active"));
+    if(restoreId) document.getElementById(restoreId).classList.add("active");
+    renderAll();
+    window.removeEventListener("afterprint", cleanup);
+  };
   window.addEventListener("afterprint", cleanup);
-  setTimeout(()=>window.print(), 60);
-  setTimeout(cleanup, 4000);
+  setTimeout(()=>window.print(), 450);
 }
+
+/* ================= BAR VALUE LABELS ================= */
+const barValueLabels = {
+  id: "barValues",
+  afterDatasetsDraw(chart){
+    const opts = chart.options.plugins && chart.options.plugins.barValues;
+    if(!opts || !opts.enabled) return;
+    const {ctx} = chart;
+    const horizontal = chart.options.indexAxis === "y";
+    const fmtV = v => {
+      if(v===null||v===undefined||isNaN(v)) return "";
+      const a = Math.abs(v);
+      if(a >= 100000) return (v/1000).toFixed(0)+"k";
+      if(a >= 10000)  return (v/1000).toFixed(1)+"k";
+      if(a >= 1000)   return Math.round(v).toLocaleString("en-US");
+      if(a >= 100)    return Math.round(v).toString();
+      return (Math.round(v*10)/10).toString();
+    };
+    ctx.save();
+    ctx.fillStyle = "#3A4356";
+    ctx.font = "600 9.5px Inter, sans-serif";
+    chart.data.datasets.forEach((ds, di) => {
+      const meta = chart.getDatasetMeta(di);
+      if(meta.hidden || meta.type !== "bar") return;
+      meta.data.forEach((bar, i) => {
+        const v = ds.data[i];
+        if(v===null||v===undefined||isNaN(v)||v===0) return;
+        if(horizontal){
+          ctx.textAlign = "left"; ctx.textBaseline = "middle";
+          ctx.fillText(fmtV(v), bar.x + 5, bar.y);
+        } else {
+          ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+          ctx.fillText(fmtV(v), bar.x, bar.y - 3);
+        }
+      });
+    });
+    ctx.restore();
+  }
+};
+Chart.register(barValueLabels);
 
 /* ================= CHART OPTS ================= */
 function baseBarOpts(horizontal, showLegend){
   return {
     indexAxis: horizontal? "y":"x",
-    plugins:{ legend:{ display: !!showLegend, labels:{color:"#5B6B85", font:{size:11}} } },
+    layout:{ padding: horizontal ? {right:34} : {top:14} },
+    plugins:{ legend:{ display: !!showLegend, labels:{color:"#5B6B85", font:{size:11}} }, barValues:{enabled:true} },
     scales:{
       x:{ ticks:{color:"#5B6B85", font:{size:10}}, grid:{color:"rgba(18,26,46,0.06)"} },
       y:{ ticks:{color:"#5B6B85", font:{size:10}}, grid:{color:"rgba(18,26,46,0.06)"} }
